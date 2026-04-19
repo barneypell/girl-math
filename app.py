@@ -1,5 +1,13 @@
+from __future__ import annotations
+
 import html
+import json
+import secrets
+import sqlite3
+import string
 import urllib.parse
+from datetime import datetime, timezone
+from pathlib import Path
 
 import streamlit as st
 
@@ -12,24 +20,286 @@ st.set_page_config(
 )
 
 
-if "is_vip" not in st.session_state:
-    st.session_state.is_vip = False
+DB_PATH = Path(__file__).with_name("girl_math.db")
+DEFAULT_SNACK_CHOICES = ["Healthy Pack", "Sweet Tooth", "Lemonade", "Milkshakes"]
+DEFAULT_SPA_CHOICES = ["Mini manicure", "Hair sparkle", "Dress-up glam", "Comics corner"]
+DEFAULT_MERCH_CHOICES = ["Custom name tag", "Sticker pack", "Bow accessory", "Surprise merch"]
+DEFAULT_EXTRA_CHOICES = ["Pink", "Orange", "Gems", "Hearts", "Sparkles"]
 
-if "snack_choices" not in st.session_state:
-    st.session_state.snack_choices = {
-        "Healthy Pack": False,
-        "Sweet Tooth": False,
-        "Lemonade": False,
-        "Milkshakes": False,
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def get_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db() -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS vip_passes (
+                passcode TEXT PRIMARY KEY,
+                member_name TEXT NOT NULL DEFAULT '',
+                badge_name TEXT NOT NULL DEFAULT '',
+                badge_color TEXT NOT NULL DEFAULT '#f598b8',
+                snack_json TEXT NOT NULL DEFAULT '{}',
+                spa_choice TEXT NOT NULL DEFAULT 'Mini manicure',
+                merch_pick TEXT NOT NULL DEFAULT 'Custom name tag',
+                extras_json TEXT NOT NULL DEFAULT '[]',
+                is_vip INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+
+
+init_db()
+
+
+def normalize_passcode(value: str) -> str:
+    return "".join(ch for ch in value.upper().strip() if ch.isalnum())[:8]
+
+
+def generate_passcode(length: int = 6) -> str:
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    while True:
+        passcode = "".join(secrets.choice(alphabet) for _ in range(length))
+        if not get_pass(passcode):
+            return passcode
+
+
+
+def default_pass_record(member_name: str = "") -> dict:
+    return {
+        "passcode": "",
+        "member_name": member_name,
+        "badge_name": member_name,
+        "badge_color": "#f598b8",
+        "snack_json": json.dumps({label: False for label in DEFAULT_SNACK_CHOICES}),
+        "spa_choice": DEFAULT_SPA_CHOICES[0],
+        "merch_pick": DEFAULT_MERCH_CHOICES[0],
+        "extras_json": json.dumps([]),
+        "is_vip": 0,
+        "created_at": utc_now_iso(),
+        "updated_at": utc_now_iso(),
     }
 
 
-if "spa_choice" not in st.session_state:
-    st.session_state.spa_choice = "Mini manicure"
+
+def create_pass(member_name: str = "") -> dict:
+    record = default_pass_record(member_name=member_name.strip())
+    record["passcode"] = generate_passcode()
+    record["badge_name"] = record["member_name"]
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO vip_passes (
+                passcode, member_name, badge_name, badge_color,
+                snack_json, spa_choice, merch_pick, extras_json,
+                is_vip, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                record["passcode"],
+                record["member_name"],
+                record["badge_name"],
+                record["badge_color"],
+                record["snack_json"],
+                record["spa_choice"],
+                record["merch_pick"],
+                record["extras_json"],
+                record["is_vip"],
+                record["created_at"],
+                record["updated_at"],
+            ),
+        )
+    return get_pass(record["passcode"])
+
+
+
+def get_pass(passcode: str) -> dict | None:
+    code = normalize_passcode(passcode)
+    if not code:
+        return None
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM vip_passes WHERE passcode = ?", (code,)).fetchone()
+    return dict(row) if row else None
+
+
+
+def save_pass(record: dict) -> None:
+    payload = {
+        "passcode": normalize_passcode(record.get("passcode", "")),
+        "member_name": record.get("member_name", "").strip(),
+        "badge_name": record.get("badge_name", "").strip(),
+        "badge_color": record.get("badge_color", "#f598b8"),
+        "snack_json": json.dumps(record.get("snacks", {})),
+        "spa_choice": record.get("spa_choice", DEFAULT_SPA_CHOICES[0]),
+        "merch_pick": record.get("merch_pick", DEFAULT_MERCH_CHOICES[0]),
+        "extras_json": json.dumps(record.get("extras", [])),
+        "is_vip": 1 if record.get("is_vip") else 0,
+        "created_at": record.get("created_at") or utc_now_iso(),
+        "updated_at": utc_now_iso(),
+    }
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO vip_passes (
+                passcode, member_name, badge_name, badge_color,
+                snack_json, spa_choice, merch_pick, extras_json,
+                is_vip, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(passcode) DO UPDATE SET
+                member_name = excluded.member_name,
+                badge_name = excluded.badge_name,
+                badge_color = excluded.badge_color,
+                snack_json = excluded.snack_json,
+                spa_choice = excluded.spa_choice,
+                merch_pick = excluded.merch_pick,
+                extras_json = excluded.extras_json,
+                is_vip = excluded.is_vip,
+                updated_at = excluded.updated_at
+            """,
+            (
+                payload["passcode"],
+                payload["member_name"],
+                payload["badge_name"],
+                payload["badge_color"],
+                payload["snack_json"],
+                payload["spa_choice"],
+                payload["merch_pick"],
+                payload["extras_json"],
+                payload["is_vip"],
+                payload["created_at"],
+                payload["updated_at"],
+            ),
+        )
+
+
+
+def stats() -> dict:
+    today = datetime.now(timezone.utc).date().isoformat()
+    with get_conn() as conn:
+        total_passes = conn.execute("SELECT COUNT(*) FROM vip_passes").fetchone()[0]
+        vip_count = conn.execute("SELECT COUNT(*) FROM vip_passes WHERE is_vip = 1").fetchone()[0]
+        today_count = conn.execute(
+            "SELECT COUNT(*) FROM vip_passes WHERE substr(created_at, 1, 10) = ?",
+            (today,),
+        ).fetchone()[0]
+    return {"total_passes": total_passes, "vip_count": vip_count, "today_count": today_count}
+
+
+
+def parse_snacks(record: dict | None) -> dict[str, bool]:
+    base = {label: False for label in DEFAULT_SNACK_CHOICES}
+    if not record:
+        return base
+    try:
+        loaded = json.loads(record.get("snack_json", "{}"))
+    except (TypeError, json.JSONDecodeError):
+        loaded = {}
+    for label in DEFAULT_SNACK_CHOICES:
+        base[label] = bool(loaded.get(label, False))
+    return base
+
+
+
+def parse_extras(record: dict | None) -> list[str]:
+    if not record:
+        return []
+    try:
+        loaded = json.loads(record.get("extras_json", "[]"))
+    except (TypeError, json.JSONDecodeError):
+        loaded = []
+    return [item for item in loaded if item in DEFAULT_EXTRA_CHOICES]
+
+
+
+def human_time(iso_value: str | None) -> str:
+    if not iso_value:
+        return "just now"
+    try:
+        dt = datetime.fromisoformat(iso_value.replace("Z", "+00:00"))
+        return dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    except ValueError:
+        return iso_value
+
+
+
+def apply_record_to_state(record: dict) -> None:
+    st.session_state.current_passcode = record["passcode"]
+    st.session_state.record_created_at = record.get("created_at", utc_now_iso())
+    st.session_state.record_updated_at = record.get("updated_at", utc_now_iso())
+    st.session_state.member_name = record.get("member_name", "")
+    st.session_state.badge_name = record.get("badge_name", record.get("member_name", ""))
+    st.session_state.badge_color = record.get("badge_color", "#f598b8")
+    st.session_state.is_vip = bool(record.get("is_vip", 0))
+    st.session_state.spa_choice = record.get("spa_choice", DEFAULT_SPA_CHOICES[0])
+    st.session_state.merch_pick = record.get("merch_pick", DEFAULT_MERCH_CHOICES[0])
+    st.session_state.badge_extras = parse_extras(record)
+    for label, selected in parse_snacks(record).items():
+        st.session_state[f"snack::{label}"] = selected
+    try:
+        st.query_params["pass"] = record["passcode"]
+    except Exception:
+        pass
+
+
+
+def load_pass_into_state(passcode: str) -> bool:
+    record = get_pass(passcode)
+    if not record:
+        return False
+    apply_record_to_state(record)
+    return True
+
+
+
+def clear_current_pass() -> None:
+    st.session_state.current_passcode = ""
+    st.session_state.record_created_at = ""
+    st.session_state.record_updated_at = ""
+    st.session_state.member_name = ""
+    st.session_state.badge_name = ""
+    st.session_state.badge_color = "#f598b8"
+    st.session_state.is_vip = False
+    st.session_state.spa_choice = DEFAULT_SPA_CHOICES[0]
+    st.session_state.merch_pick = DEFAULT_MERCH_CHOICES[0]
+    st.session_state.badge_extras = []
+    for label in DEFAULT_SNACK_CHOICES:
+        st.session_state[f"snack::{label}"] = False
+    try:
+        if "pass" in st.query_params:
+            del st.query_params["pass"]
+    except Exception:
+        pass
+
+
+
+def current_record_payload() -> dict:
+    return {
+        "passcode": st.session_state.get("current_passcode", ""),
+        "created_at": st.session_state.get("record_created_at", utc_now_iso()),
+        "member_name": st.session_state.get("member_name", "").strip(),
+        "badge_name": st.session_state.get("badge_name", "").strip(),
+        "badge_color": st.session_state.get("badge_color", "#f598b8"),
+        "snacks": {label: bool(st.session_state.get(f"snack::{label}", False)) for label in DEFAULT_SNACK_CHOICES},
+        "spa_choice": st.session_state.get("spa_choice", DEFAULT_SPA_CHOICES[0]),
+        "merch_pick": st.session_state.get("merch_pick", DEFAULT_MERCH_CHOICES[0]),
+        "extras": st.session_state.get("badge_extras", []),
+        "is_vip": bool(st.session_state.get("is_vip", False)),
+    }
+
 
 
 def svg_data_uri(svg: str) -> str:
     return "data:image/svg+xml;utf8," + urllib.parse.quote(svg)
+
 
 
 def wobble_word_html(text: str) -> str:
@@ -48,6 +318,7 @@ def wobble_word_html(text: str) -> str:
     return "".join(letters)
 
 
+
 def flower_vine_svg() -> str:
     svg = """
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 140" width="900" height="140">
@@ -63,7 +334,6 @@ def flower_vine_svg() -> str:
       <path d="M295 68 C305 52, 307 42, 304 26" fill="none" stroke="#9fbe54" stroke-width="5" stroke-linecap="round"/>
       <path d="M495 73 C505 57, 510 44, 516 28" fill="none" stroke="#9fbe54" stroke-width="5" stroke-linecap="round"/>
       <path d="M708 72 C718 57, 724 42, 728 28" fill="none" stroke="#9fbe54" stroke-width="5" stroke-linecap="round"/>
-
       <ellipse cx="120" cy="48" rx="16" ry="9" fill="#b4d46a" transform="rotate(-22 120 48)"/>
       <ellipse cx="139" cy="41" rx="16" ry="9" fill="#b4d46a" transform="rotate(28 139 41)"/>
       <ellipse cx="292" cy="34" rx="16" ry="9" fill="#b4d46a" transform="rotate(-35 292 34)"/>
@@ -72,7 +342,6 @@ def flower_vine_svg() -> str:
       <ellipse cx="522" cy="31" rx="16" ry="9" fill="#b4d46a" transform="rotate(30 522 31)"/>
       <ellipse cx="717" cy="38" rx="16" ry="9" fill="#b4d46a" transform="rotate(-28 717 38)"/>
       <ellipse cx="738" cy="31" rx="16" ry="9" fill="#b4d46a" transform="rotate(24 738 31)"/>
-
       <g filter="url(#softShadow)">
         <g transform="translate(82 28)">
           <ellipse cx="20" cy="20" rx="13" ry="18" fill="#f7bad0"/>
@@ -106,7 +375,6 @@ def flower_vine_svg() -> str:
 
 FLOWER_VINE = flower_vine_svg()
 
-
 STICKER_SVG = svg_data_uri(
     """
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="240" height="240">
@@ -116,10 +384,7 @@ STICKER_SVG = svg_data_uri(
           <stop offset="100%" stop-color="#f48fb2"/>
         </radialGradient>
       </defs>
-      <path d="M120 16
-               L139 38 L168 23 L177 51 L209 46 L205 78 L232 92 L216 119 L236 144 L210 159
-               L219 189 L188 193 L183 223 L154 213 L136 238 L112 217 L86 233 L72 205
-               L42 212 L39 181 L11 171 L23 142 L7 118 L31 98 L20 70 L51 64 L54 33 L84 42 L103 18 Z"
+      <path d="M120 16 L139 38 L168 23 L177 51 L209 46 L205 78 L232 92 L216 119 L236 144 L210 159 L219 189 L188 193 L183 223 L154 213 L136 238 L112 217 L86 233 L72 205 L42 212 L39 181 L11 171 L23 142 L7 118 L31 98 L20 70 L51 64 L54 33 L84 42 L103 18 Z"
             fill="url(#g)" stroke="#d46f95" stroke-width="6" stroke-linejoin="round"/>
       <path d="M87 104 C87 86, 102 72, 120 72 C138 72, 153 86, 153 104 C153 128, 120 149, 120 149 C120 149, 87 128, 87 104 Z"
             fill="#fff4f8" stroke="#d46f95" stroke-width="4"/>
@@ -128,7 +393,6 @@ STICKER_SVG = svg_data_uri(
     </svg>
     """
 )
-
 
 GEM_CLUSTER_SVG = svg_data_uri(
     """
@@ -145,7 +409,6 @@ GEM_CLUSTER_SVG = svg_data_uri(
     """
 )
 
-
 BOW_SVG = svg_data_uri(
     """
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 120" width="220" height="120">
@@ -157,7 +420,6 @@ BOW_SVG = svg_data_uri(
     </svg>
     """
 )
-
 
 COMIC_STRIP_HTML = f"""
 <div class='comic-grid'>
@@ -176,8 +438,7 @@ COMIC_STRIP_HTML = f"""
         <path d="M145 110 L128 126" stroke="#887c7b" stroke-width="3"/>
         <path d="M145 110 L162 126" stroke="#887c7b" stroke-width="3"/>
       </svg>
-    ''')}" alt="comic panel 1"/>
-    </div>
+    ''')}" alt="comic panel 1"/></div>
     <div class='comic-caption'>“Where did you get it?”</div>
   </div>
   <div class='comic-panel tilt-b'>
@@ -199,8 +460,7 @@ COMIC_STRIP_HTML = f"""
         <text x="160" y="46" text-anchor="middle" font-size="14" font-family="Patrick Hand, Comic Sans MS, sans-serif" fill="#655f68">Girl Math</text>
         <text x="160" y="61" text-anchor="middle" font-size="14" font-family="Patrick Hand, Comic Sans MS, sans-serif" fill="#655f68">VIP!</text>
       </svg>
-    ''')}" alt="comic panel 2"/>
-    </div>
+    ''')}" alt="comic panel 2"/></div>
     <div class='comic-caption'>VIP nails and sparkle time</div>
   </div>
   <div class='comic-panel tilt-c'>
@@ -223,8 +483,7 @@ COMIC_STRIP_HTML = f"""
         <circle cx="171" cy="54" r="9" fill="#d8f4ff" stroke="#7bb5c9" stroke-width="3"/>
         <circle cx="197" cy="58" r="8" fill="#fff2bb" stroke="#d1b25a" stroke-width="3"/>
       </svg>
-    ''')}" alt="comic panel 3"/>
-    </div>
+    ''')}" alt="comic panel 3"/></div>
     <div class='comic-caption'>Instant princess mode</div>
   </div>
 </div>
@@ -256,272 +515,78 @@ def badge_svg(name: str, color: str, extras: list[str]) -> str:
     return svg_data_uri(svg)
 
 
+for key, default_value in {
+    "current_passcode": "",
+    "record_created_at": "",
+    "record_updated_at": "",
+    "member_name": "",
+    "badge_name": "",
+    "badge_color": "#f598b8",
+    "is_vip": False,
+    "spa_choice": DEFAULT_SPA_CHOICES[0],
+    "merch_pick": DEFAULT_MERCH_CHOICES[0],
+    "badge_extras": [],
+}.items():
+    st.session_state.setdefault(key, default_value)
+
+for label in DEFAULT_SNACK_CHOICES:
+    st.session_state.setdefault(f"snack::{label}", False)
+
+query_pass = normalize_passcode(st.query_params.get("pass", "")) if hasattr(st, "query_params") else ""
+if query_pass and query_pass != st.session_state.get("current_passcode"):
+    load_pass_into_state(query_pass)
+
+
 st.markdown(
     """
     <style>
       @import url('https://fonts.googleapis.com/css2?family=Bubblegum+Sans&family=Patrick+Hand&display=swap');
-
       :root {
         --paper: #fffafc;
         --paper-2: #fff5f9;
         --ink: #6e6670;
         --pink: #f4a9bf;
         --pink-dark: #ce7897;
-        --pink-soft: #ffdbe8;
-        --mint: #dff6f5;
-        --green: #a7c64c;
         --line: #d8cfd7;
       }
-
-      .stApp {
-        background: linear-gradient(180deg, #fffdfd 0%, #fff8fb 100%);
-      }
-
-      .block-container {
-        max-width: 820px;
-        padding-top: 0.85rem;
-        padding-bottom: 2rem;
-        padding-left: 0.75rem;
-        padding-right: 0.75rem;
-      }
-
-      .main * {
-        color: var(--ink);
-      }
-
-      .poster-wrap {
-        background: linear-gradient(180deg, #ffffff 0%, #fffafd 100%);
-        border: 2px solid #f1e7ee;
-        border-radius: 28px;
-        padding: 0.9rem 0.8rem 1rem;
-        box-shadow: 0 16px 40px rgba(223, 156, 183, 0.12);
-      }
-
-      .doodle-vine {
-        width: 100%;
-        margin: 0.1rem auto 0.25rem;
-      }
-
-      .wobble-title {
-        display: flex;
-        justify-content: center;
-        align-items: flex-end;
-        flex-wrap: wrap;
-        gap: 0.05rem;
-        margin-top: 0.1rem;
-        margin-bottom: 0.15rem;
-      }
-
-      .wobble-letter {
-        display: inline-block;
-        font-family: 'Bubblegum Sans', 'Comic Sans MS', sans-serif;
-        font-size: clamp(2.6rem, 10vw, 5rem);
-        line-height: 0.9;
-        color: var(--pink);
-        text-shadow:
-          -2px -2px 0 var(--pink-dark),
-           2px -2px 0 var(--pink-dark),
-          -2px  2px 0 var(--pink-dark),
-           2px  2px 0 var(--pink-dark),
-           0    5px 0 rgba(255,255,255,0.65);
-      }
-
-      .space {
-        width: 0.7rem;
-      }
-
-      .subtitle {
-        text-align: center;
-        font-family: 'Patrick Hand', 'Comic Sans MS', cursive;
-        font-size: 1.38rem;
-        letter-spacing: 0.03em;
-        color: #918792;
-        margin-bottom: 0.45rem;
-      }
-
-      .pearl-row {
-        display: flex;
-        justify-content: center;
-        flex-wrap: nowrap;
-        gap: 0.32rem;
-        margin: 0.55rem 0 0.65rem;
-      }
-
-      .pearl {
-        width: 11px;
-        height: 11px;
-        border-radius: 50%;
-        background: radial-gradient(circle at 35% 35%, #fff 0%, #fff 32%, #f9e7ef 65%, #ebd1dc 100%);
-        box-shadow: 0 0 0 1px rgba(218, 190, 204, 0.55);
-      }
-
-      .tiny-doodles {
-        display: flex;
-        justify-content: center;
-        margin-bottom: 0.25rem;
-      }
-
-      .paper-card, .section-card {
-        background: linear-gradient(180deg, var(--paper) 0%, var(--paper-2) 100%);
-        border: 2px solid var(--line);
-        border-radius: 22px;
-        padding: 1rem 0.9rem;
-        box-shadow: 0 10px 24px rgba(228, 174, 196, 0.08);
-        margin-bottom: 0.95rem;
-      }
-
-      .paper-card {
-        transform: rotate(-0.35deg);
-      }
-
-      .section-card:nth-of-type(odd) {
-        transform: rotate(0.2deg);
-      }
-
-      .section-card:nth-of-type(even) {
-        transform: rotate(-0.15deg);
-      }
-
-      .card-title {
-        font-family: 'Bubblegum Sans', 'Comic Sans MS', sans-serif;
-        font-size: 1.95rem;
-        line-height: 1;
-        color: #7a7078;
-        margin-bottom: 0.35rem;
-      }
-
-      .hand-copy, .comic-caption, .mini-note, .footer-note {
-        font-family: 'Patrick Hand', 'Comic Sans MS', cursive;
-        font-size: 1.18rem;
-        line-height: 1.2;
-      }
-
-      .mini-note {
-        color: #978d97;
-      }
-
-      .comic-grid {
-        display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-        gap: 0.7rem;
-        margin-top: 0.65rem;
-      }
-
-      .comic-panel {
-        background: #fffefe;
-        border: 2px solid #d5ccd4;
-        border-radius: 18px;
-        padding: 0.45rem 0.45rem 0.55rem;
-      }
-
-      .tilt-a { transform: rotate(-1.2deg); }
-      .tilt-b { transform: rotate(0.9deg); }
-      .tilt-c { transform: rotate(-0.75deg); }
-
-      .comic-art img {
-        width: 100%;
-        display: block;
-        border-radius: 12px;
-      }
-
-      .comic-caption {
-        text-align: center;
-        margin-top: 0.2rem;
-      }
-
-      .sticker-wrap {
-        display: grid;
-        grid-template-columns: 180px 1fr;
-        gap: 0.75rem;
-        align-items: center;
-      }
-
-      .sticker-wrap img, .bow-row img, .gem-row img, .badge-image img {
-        width: 100%;
-        display: block;
-      }
-
-      .access-title {
-        font-family: 'Bubblegum Sans', 'Comic Sans MS', sans-serif;
-        font-size: 2.25rem;
-        color: #7a7078;
-        text-align: center;
-        margin: 0.25rem 0 0.7rem;
-      }
-
-      .decor-row {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 0.65rem;
-        margin: 0.15rem 0 0.65rem;
-      }
-
-      .bow-row, .gem-row {
-        background: #fff;
-        border: 2px dashed #e7c8d5;
-        border-radius: 18px;
-        padding: 0.35rem 0.7rem;
-      }
-
-      .field-caption {
-        font-family: 'Patrick Hand', 'Comic Sans MS', cursive;
-        font-size: 1.1rem;
-        color: #938892;
-      }
-
-      .stButton > button {
-        width: 100%;
-        border-radius: 999px;
-        border: 2px solid #df84a5;
-        background: linear-gradient(180deg, #ffc1d3 0%, #f598b8 100%);
-        color: white !important;
-        font-family: 'Bubblegum Sans', 'Comic Sans MS', sans-serif;
-        font-size: 1.12rem;
-        letter-spacing: 0.03em;
-        padding: 0.78rem 1rem;
-        box-shadow: 0 8px 16px rgba(230, 137, 171, 0.25);
-      }
-
-      .stTextInput label, .stColorPicker label, .stSelectbox label,
-      .stMultiSelect label, .stCheckbox label, .stRadio label {
-        font-family: 'Patrick Hand', 'Comic Sans MS', cursive !important;
-        font-size: 1.08rem !important;
-        color: #756c76 !important;
-      }
-
-      .badge-shell {
-        background: #fff;
-        border: 2px dashed #e4c5d4;
-        border-radius: 20px;
-        padding: 0.7rem;
-      }
-
-      .badge-image {
-        max-width: 100%;
-      }
-
-      .footer-note {
-        text-align: center;
-        color: #8f8590;
-        margin-top: 0.2rem;
-      }
-
-      @media (max-width: 680px) {
-        .comic-grid,
-        .decor-row,
-        .sticker-wrap {
-          grid-template-columns: 1fr;
-        }
-
-        .poster-wrap {
-          padding-left: 0.7rem;
-          padding-right: 0.7rem;
-        }
-
-        .subtitle {
-          font-size: 1.2rem;
-        }
-      }
+      .stApp { background: linear-gradient(180deg, #fffdfd 0%, #fff8fb 100%); }
+      .block-container { max-width: 860px; padding-top: 0.85rem; padding-bottom: 2rem; padding-left: 0.75rem; padding-right: 0.75rem; }
+      .main * { color: var(--ink); }
+      .poster-wrap { background: linear-gradient(180deg, #ffffff 0%, #fffafd 100%); border: 2px solid #f1e7ee; border-radius: 28px; padding: 0.9rem 0.8rem 1rem; box-shadow: 0 16px 40px rgba(223, 156, 183, 0.12); }
+      .doodle-vine { width: 100%; margin: 0.1rem auto 0.25rem; }
+      .wobble-title { display: flex; justify-content: center; align-items: flex-end; flex-wrap: wrap; gap: 0.05rem; margin-top: 0.1rem; margin-bottom: 0.15rem; }
+      .wobble-letter { display: inline-block; font-family: 'Bubblegum Sans', 'Comic Sans MS', sans-serif; font-size: clamp(2.6rem, 10vw, 5rem); line-height: 0.9; color: var(--pink); text-shadow: -2px -2px 0 var(--pink-dark), 2px -2px 0 var(--pink-dark), -2px 2px 0 var(--pink-dark), 2px 2px 0 var(--pink-dark), 0 5px 0 rgba(255,255,255,0.65); }
+      .space { width: 0.7rem; }
+      .subtitle { text-align: center; font-family: 'Patrick Hand', 'Comic Sans MS', cursive; font-size: 1.38rem; letter-spacing: 0.03em; color: #918792; margin-bottom: 0.45rem; }
+      .pearl-row { display: flex; justify-content: center; flex-wrap: nowrap; gap: 0.32rem; margin: 0.55rem 0 0.65rem; }
+      .pearl { width: 11px; height: 11px; border-radius: 50%; background: radial-gradient(circle at 35% 35%, #fff 0%, #fff 32%, #f9e7ef 65%, #ebd1dc 100%); box-shadow: 0 0 0 1px rgba(218, 190, 204, 0.55); }
+      .tiny-doodles { display: flex; justify-content: center; margin-bottom: 0.25rem; }
+      .paper-card, .section-card, .status-card { background: linear-gradient(180deg, var(--paper) 0%, var(--paper-2) 100%); border: 2px solid var(--line); border-radius: 22px; padding: 1rem 0.9rem; box-shadow: 0 10px 24px rgba(228, 174, 196, 0.08); margin-bottom: 0.95rem; }
+      .paper-card { transform: rotate(-0.35deg); }
+      .section-card:nth-of-type(odd) { transform: rotate(0.2deg); }
+      .section-card:nth-of-type(even) { transform: rotate(-0.15deg); }
+      .card-title { font-family: 'Bubblegum Sans', 'Comic Sans MS', sans-serif; font-size: 1.95rem; line-height: 1; color: #7a7078; margin-bottom: 0.35rem; }
+      .hand-copy, .comic-caption, .mini-note, .footer-note, .field-caption { font-family: 'Patrick Hand', 'Comic Sans MS', cursive; font-size: 1.18rem; line-height: 1.2; }
+      .mini-note { color: #978d97; }
+      .status-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.65rem; margin-top: 0.6rem; }
+      .status-pill { background: #fff; border: 2px dashed #e7c8d5; border-radius: 18px; padding: 0.7rem; text-align: center; }
+      .status-number { font-family: 'Bubblegum Sans', 'Comic Sans MS', sans-serif; font-size: 2rem; color: #d57b9d; }
+      .comic-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.7rem; margin-top: 0.65rem; }
+      .comic-panel { background: #fffefe; border: 2px solid #d5ccd4; border-radius: 18px; padding: 0.45rem 0.45rem 0.55rem; }
+      .tilt-a { transform: rotate(-1.2deg); } .tilt-b { transform: rotate(0.9deg); } .tilt-c { transform: rotate(-0.75deg); }
+      .comic-art img, .sticker-wrap img, .bow-row img, .gem-row img, .badge-image img { width: 100%; display: block; border-radius: 12px; }
+      .comic-caption { text-align: center; margin-top: 0.2rem; }
+      .sticker-wrap { display: grid; grid-template-columns: 180px 1fr; gap: 0.75rem; align-items: center; }
+      .access-title { font-family: 'Bubblegum Sans', 'Comic Sans MS', sans-serif; font-size: 2.25rem; color: #7a7078; text-align: center; margin: 0.25rem 0 0.7rem; }
+      .decor-row { display: grid; grid-template-columns: 1fr 1fr; gap: 0.65rem; margin: 0.15rem 0 0.65rem; }
+      .bow-row, .gem-row { background: #fff; border: 2px dashed #e7c8d5; border-radius: 18px; padding: 0.35rem 0.7rem; }
+      .field-caption { color: #938892; margin-bottom: 0.25rem; }
+      .code-box { background: #fff; border: 2px dashed #e6c5d3; border-radius: 16px; padding: 0.7rem; text-align: center; font-family: 'Bubblegum Sans', 'Comic Sans MS', sans-serif; font-size: 2rem; letter-spacing: 0.08em; color: #d57b9d; }
+      .stButton > button { width: 100%; border-radius: 999px; border: 2px solid #df84a5; background: linear-gradient(180deg, #ffc1d3 0%, #f598b8 100%); color: white !important; font-family: 'Bubblegum Sans', 'Comic Sans MS', sans-serif; font-size: 1.05rem; letter-spacing: 0.03em; padding: 0.78rem 1rem; box-shadow: 0 8px 16px rgba(230, 137, 171, 0.25); }
+      .stTextInput label, .stColorPicker label, .stSelectbox label, .stMultiSelect label, .stCheckbox label, .stRadio label { font-family: 'Patrick Hand', 'Comic Sans MS', cursive !important; font-size: 1.08rem !important; color: #756c76 !important; }
+      .badge-shell { background: #fff; border: 2px dashed #e4c5d4; border-radius: 20px; padding: 0.7rem; }
+      .footer-note { text-align: center; color: #8f8590; margin-top: 0.2rem; }
+      @media (max-width: 680px) { .comic-grid, .decor-row, .sticker-wrap, .status-grid { grid-template-columns: 1fr; } .poster-wrap { padding-left: 0.7rem; padding-right: 0.7rem; } .subtitle { font-size: 1.2rem; } }
     </style>
     """,
     unsafe_allow_html=True,
@@ -530,114 +595,146 @@ st.markdown(
 
 st.markdown("<div class='poster-wrap'>", unsafe_allow_html=True)
 st.markdown(f"<img class='doodle-vine' src='{FLOWER_VINE}' alt='flower vine divider' />", unsafe_allow_html=True)
-st.markdown(
-    f"<div class='wobble-title'>{wobble_word_html('VIP PASS')}</div>",
-    unsafe_allow_html=True,
-)
+st.markdown(f"<div class='wobble-title'>{wobble_word_html('VIP PASS')}</div>", unsafe_allow_html=True)
 st.markdown("<div class='subtitle'>AT: Girl Math Hair Salon</div>", unsafe_allow_html=True)
 st.markdown(f"<img class='doodle-vine' src='{FLOWER_VINE}' alt='flower vine divider' />", unsafe_allow_html=True)
-st.markdown(
-    "<div class='pearl-row'>" + "".join("<span class='pearl'></span>" for _ in range(19)) + "</div>",
-    unsafe_allow_html=True,
-)
+st.markdown("<div class='pearl-row'>" + "".join("<span class='pearl'></span>" for _ in range(19)) + "</div>", unsafe_allow_html=True)
 st.markdown(f"<div class='tiny-doodles'><img src='{GEM_CLUSTER_SVG}' alt='gems' style='max-width:220px;'/></div>", unsafe_allow_html=True)
 st.markdown("</div>", unsafe_allow_html=True)
 
-
-st.markdown("<div class='paper-card'>", unsafe_allow_html=True)
-st.markdown("<div class='card-title'>How to get V.I.P.</div>", unsafe_allow_html=True)
+app_stats = stats()
+st.markdown("<div class='status-card'>", unsafe_allow_html=True)
+st.markdown("<div class='card-title'>Shared VIP Passes</div>", unsafe_allow_html=True)
+st.markdown("<div class='hand-copy'>This app now stores each VIP pass in a shared backend. Create a pass once, then reopen it from another phone or browser with the same pass code.</div>", unsafe_allow_html=True)
 st.markdown(
-    "<div class='hand-copy'>A worker will tell you how to get V.I.P.<br><span class='mini-note'>Just ask and they can upgrade you.</span></div>",
+    f"""
+    <div class='status-grid'>
+      <div class='status-pill'><div class='status-number'>{app_stats['total_passes']}</div><div class='mini-note'>total passes</div></div>
+      <div class='status-pill'><div class='status-number'>{app_stats['vip_count']}</div><div class='mini-note'>VIP unlocked</div></div>
+      <div class='status-pill'><div class='status-number'>{app_stats['today_count']}</div><div class='mini-note'>created today</div></div>
+    </div>
+    """,
     unsafe_allow_html=True,
 )
-button_text = "ASK FOR VIP STATUS" if not st.session_state.is_vip else "YOU ARE NOW VIP"
-if st.button(button_text, use_container_width=True):
-    if not st.session_state.is_vip:
+st.markdown("</div>", unsafe_allow_html=True)
+
+st.markdown("<div class='status-card'>", unsafe_allow_html=True)
+st.markdown("<div class='card-title'>Create or open a pass</div>", unsafe_allow_html=True)
+create_col, open_col = st.columns(2)
+with create_col:
+    new_member_name = st.text_input("VIP member name", key="new_member_name", placeholder="Type the name for a new pass")
+    if st.button("Create new pass", use_container_width=True, key="create_pass_button"):
+        record = create_pass(new_member_name)
+        apply_record_to_state(record)
+        st.success(f"Created pass {record['passcode']}")
+with open_col:
+    existing_code = st.text_input("Open existing pass", key="existing_pass_code", placeholder="Enter pass code")
+    if st.button("Open pass", use_container_width=True, key="open_pass_button"):
+        if load_pass_into_state(existing_code):
+            st.success(f"Loaded pass {normalize_passcode(existing_code)}")
+        else:
+            st.error("That pass code was not found.")
+
+if st.session_state.current_passcode:
+    st.markdown("<div class='mini-note' style='margin-top:0.65rem;'>Current pass code</div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='code-box'>{st.session_state.current_passcode}</div>", unsafe_allow_html=True)
+    st.caption(
+        f"Created {human_time(st.session_state.record_created_at)} • Last saved {human_time(st.session_state.record_updated_at)}"
+    )
+    if st.button("Start a different pass", use_container_width=True, key="clear_pass_button"):
+        clear_current_pass()
+        st.rerun()
+else:
+    st.info("Create a pass or open one with its code to start editing shared data.")
+st.markdown("</div>", unsafe_allow_html=True)
+
+if st.session_state.current_passcode:
+    st.markdown("<div class='paper-card'>", unsafe_allow_html=True)
+    st.markdown("<div class='card-title'>How to get V.I.P.</div>", unsafe_allow_html=True)
+    st.markdown("<div class='hand-copy'>A worker will tell you how to get V.I.P.<br><span class='mini-note'>This status now saves across devices for the same pass code.</span></div>", unsafe_allow_html=True)
+    st.text_input("VIP member name", key="member_name", placeholder="Type the VIP member name")
+    if not st.session_state.get("badge_name") and st.session_state.get("member_name"):
+        st.session_state.badge_name = st.session_state.member_name
+    button_text = "ASK FOR VIP STATUS" if not st.session_state.is_vip else "YOU ARE NOW VIP"
+    if st.button(button_text, use_container_width=True, key="vip_status_button"):
         st.session_state.is_vip = True
         st.balloons()
+    if st.session_state.is_vip:
+        st.success("VIP unlocked.")
+    else:
+        st.info("Tap when a worker says you're ready.")
+    st.markdown("</div>", unsafe_allow_html=True)
 
-if st.session_state.is_vip:
-    st.success("VIP unlocked.")
+    st.markdown("<div class='paper-card'>", unsafe_allow_html=True)
+    st.markdown("<div class='card-title'>Comic Scene</div>", unsafe_allow_html=True)
+    st.markdown("<div class='mini-note'>(No one specific)</div>", unsafe_allow_html=True)
+    st.markdown(COMIC_STRIP_HTML, unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("<div class='paper-card'>", unsafe_allow_html=True)
+    st.markdown("<div class='card-title'>Early Gift: Sticker</div>", unsafe_allow_html=True)
+    st.markdown(
+        f"""
+        <div class='sticker-wrap'>
+          <div><img src='{STICKER_SVG}' alt='girl math sticker'/></div>
+          <div>
+            <div class='hand-copy'>A handmade-style sticker, just like the drawing.</div>
+            <div class='mini-note'>To. Look. At.</div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("<div class='access-title'>Access To:</div>", unsafe_allow_html=True)
+    st.markdown(
+        f"""
+        <div class='decor-row'>
+          <div class='bow-row'><img src='{BOW_SVG}' alt='pink bow'/></div>
+          <div class='gem-row'><img src='{GEM_CLUSTER_SVG}' alt='gem cluster'/></div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("<div class='section-card'>", unsafe_allow_html=True)
+    st.markdown("<div class='card-title'>Snack Bar</div>", unsafe_allow_html=True)
+    st.markdown("<div class='field-caption'>Pick today’s favorites.</div>", unsafe_allow_html=True)
+    for label in DEFAULT_SNACK_CHOICES:
+        st.checkbox(label, key=f"snack::{label}")
+    picked = [label for label in DEFAULT_SNACK_CHOICES if st.session_state.get(f"snack::{label}")]
+    st.caption("Picked today: " + ", ".join(picked) if picked else "Picked today: none yet")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("<div class='section-card'>", unsafe_allow_html=True)
+    st.markdown("<div class='card-title'>Spa Treatments + Weekly Comics</div>", unsafe_allow_html=True)
+    st.markdown("<div class='field-caption'>Choose a spa moment.</div>", unsafe_allow_html=True)
+    st.radio("Choose a spa moment:", DEFAULT_SPA_CHOICES, key="spa_choice")
+    st.caption(f"Today’s choice: {st.session_state.spa_choice}")
+    st.markdown("<div class='mini-note'>New comic scenes can be dropped in daily or weekly.</div>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("<div class='section-card'>", unsafe_allow_html=True)
+    st.markdown("<div class='card-title'>Merch + Name Tag</div>", unsafe_allow_html=True)
+    st.selectbox("Schedule in advance:", DEFAULT_MERCH_CHOICES, key="merch_pick")
+    st.text_input("Name tag name:", key="badge_name", placeholder="Type your VIP name")
+    st.color_picker("Name tag color:", key="badge_color")
+    st.multiselect("Customize options:", DEFAULT_EXTRA_CHOICES, key="badge_extras")
+    st.markdown(
+        f"<div class='badge-shell'><div class='badge-image'><img src='{badge_svg(st.session_state.badge_name.strip(), st.session_state.badge_color, st.session_state.badge_extras)}' alt='custom badge preview' /></div></div>",
+        unsafe_allow_html=True,
+    )
+    st.caption(f"Selected merch item: {st.session_state.merch_pick}")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    payload = current_record_payload()
+    save_pass(payload)
+    refreshed = get_pass(st.session_state.current_passcode)
+    if refreshed:
+        st.session_state.record_updated_at = refreshed.get("updated_at", utc_now_iso())
+        if refreshed.get("member_name") and not st.session_state.badge_name.strip():
+            st.session_state.badge_name = refreshed["member_name"]
+    st.markdown(f"<div class='footer-note'>Shared pass saved. Reopen with code {st.session_state.current_passcode} from another device.</div>", unsafe_allow_html=True)
 else:
-    st.info("Tap when a worker says you're ready.")
-st.markdown("</div>", unsafe_allow_html=True)
-
-
-st.markdown("<div class='paper-card'>", unsafe_allow_html=True)
-st.markdown("<div class='card-title'>Comic Scene</div>", unsafe_allow_html=True)
-st.markdown("<div class='mini-note'>(No one specific)</div>", unsafe_allow_html=True)
-st.markdown(COMIC_STRIP_HTML, unsafe_allow_html=True)
-st.markdown("</div>", unsafe_allow_html=True)
-
-
-st.markdown("<div class='paper-card'>", unsafe_allow_html=True)
-st.markdown("<div class='card-title'>Early Gift: Sticker</div>", unsafe_allow_html=True)
-st.markdown(
-    f"""
-    <div class='sticker-wrap'>
-      <div><img src='{STICKER_SVG}' alt='girl math sticker'/></div>
-      <div>
-        <div class='hand-copy'>A handmade-style sticker, just like the drawing.</div>
-        <div class='mini-note'>To. Look. At.</div>
-      </div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-st.markdown("</div>", unsafe_allow_html=True)
-
-
-st.markdown("<div class='access-title'>Access To:</div>", unsafe_allow_html=True)
-st.markdown(
-    f"""
-    <div class='decor-row'>
-      <div class='bow-row'><img src='{BOW_SVG}' alt='pink bow'/></div>
-      <div class='gem-row'><img src='{GEM_CLUSTER_SVG}' alt='gem cluster'/></div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-
-st.markdown("<div class='section-card'>", unsafe_allow_html=True)
-st.markdown("<div class='card-title'>Snack Bar</div>", unsafe_allow_html=True)
-st.markdown("<div class='field-caption'>Pick today’s favorites.</div>", unsafe_allow_html=True)
-updated_choices = {}
-for label, selected in st.session_state.snack_choices.items():
-    updated_choices[label] = st.checkbox(label, value=selected)
-st.session_state.snack_choices = updated_choices
-picked = [label for label, selected in st.session_state.snack_choices.items() if selected]
-st.caption("Picked today: " + ", ".join(picked) if picked else "Picked today: none yet")
-st.markdown("</div>", unsafe_allow_html=True)
-
-
-st.markdown("<div class='section-card'>", unsafe_allow_html=True)
-st.markdown("<div class='card-title'>Spa Treatments + Weekly Comics</div>", unsafe_allow_html=True)
-st.markdown("<div class='field-caption'>Choose a spa moment.</div>", unsafe_allow_html=True)
-st.session_state.spa_choice = st.radio(
-    "Choose a spa moment:",
-    ["Mini manicure", "Hair sparkle", "Dress-up glam", "Comics corner"],
-    index=["Mini manicure", "Hair sparkle", "Dress-up glam", "Comics corner"].index(st.session_state.spa_choice),
-)
-st.caption(f"Today’s choice: {st.session_state.spa_choice}")
-st.markdown("<div class='mini-note'>New comic scenes can be dropped in daily or weekly.</div>", unsafe_allow_html=True)
-st.markdown("</div>", unsafe_allow_html=True)
-
-
-st.markdown("<div class='section-card'>", unsafe_allow_html=True)
-st.markdown("<div class='card-title'>Merch + Name Tag</div>", unsafe_allow_html=True)
-merch_pick = st.selectbox(
-    "Schedule in advance:",
-    ["Custom name tag", "Sticker pack", "Bow accessory", "Surprise merch"],
-)
-name = st.text_input("Name tag name:", placeholder="Type your VIP name")
-color = st.color_picker("Name tag color:", "#f598b8")
-extras = st.multiselect("Customize options:", ["Pink", "Orange", "Gems", "Hearts", "Sparkles"])
-st.markdown(
-    f"<div class='badge-shell'><div class='badge-image'><img src='{badge_svg(name.strip(), color, extras)}' alt='custom badge preview' /></div></div>",
-    unsafe_allow_html=True,
-)
-st.caption(f"Selected merch item: {merch_pick}")
-st.markdown("</div>", unsafe_allow_html=True)
-
-st.markdown("<div class='footer-note'>Hand-drawn VIP pass look, tuned for phones and ready to deploy.</div>", unsafe_allow_html=True)
+    st.markdown("<div class='footer-note'>Create or open a shared pass to start the multi-user experience.</div>", unsafe_allow_html=True)
