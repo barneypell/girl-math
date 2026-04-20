@@ -44,6 +44,7 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS vip_passes (
                 passcode TEXT PRIMARY KEY,
                 member_name TEXT NOT NULL DEFAULT '',
+                contact_email TEXT NOT NULL DEFAULT '',
                 badge_name TEXT NOT NULL DEFAULT '',
                 badge_color TEXT NOT NULL DEFAULT '#f598b8',
                 snack_json TEXT NOT NULL DEFAULT '{}',
@@ -56,6 +57,20 @@ def init_db() -> None:
             )
             """
         )
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(vip_passes)")}
+        if "contact_email" not in columns:
+            conn.execute("ALTER TABLE vip_passes ADD COLUMN contact_email TEXT NOT NULL DEFAULT ''")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pass_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                passcode TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                details TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            )
+            """
+        )
 
 
 init_db()
@@ -63,6 +78,10 @@ init_db()
 
 def normalize_passcode(value: str) -> str:
     return "".join(ch for ch in value.upper().strip() if ch.isalnum())[:8]
+
+
+def normalize_email(value: str) -> str:
+    return value.strip().lower()
 
 
 def generate_passcode(length: int = 6) -> str:
@@ -78,6 +97,7 @@ def default_pass_record(member_name: str = "") -> dict:
     return {
         "passcode": "",
         "member_name": member_name,
+        "contact_email": "",
         "badge_name": member_name,
         "badge_color": "#f598b8",
         "snack_json": json.dumps({label: False for label in DEFAULT_SNACK_CHOICES}),
@@ -91,22 +111,36 @@ def default_pass_record(member_name: str = "") -> dict:
 
 
 
-def create_pass(member_name: str = "") -> dict:
+def log_event(passcode: str, event_type: str, details: str = "") -> None:
+    code = normalize_passcode(passcode)
+    if not code:
+        return
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO pass_events (passcode, event_type, details, created_at) VALUES (?, ?, ?, ?)",
+            (code, event_type, details.strip(), utc_now_iso()),
+        )
+
+
+
+def create_pass(member_name: str = "", contact_email: str = "") -> dict:
     record = default_pass_record(member_name=member_name.strip())
     record["passcode"] = generate_passcode()
+    record["contact_email"] = normalize_email(contact_email)
     record["badge_name"] = record["member_name"]
     with get_conn() as conn:
         conn.execute(
             """
             INSERT INTO vip_passes (
-                passcode, member_name, badge_name, badge_color,
+                passcode, member_name, contact_email, badge_name, badge_color,
                 snack_json, spa_choice, merch_pick, extras_json,
                 is_vip, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 record["passcode"],
                 record["member_name"],
+                record["contact_email"],
                 record["badge_name"],
                 record["badge_color"],
                 record["snack_json"],
@@ -118,6 +152,7 @@ def create_pass(member_name: str = "") -> dict:
                 record["updated_at"],
             ),
         )
+    log_event(record["passcode"], "created", f"Created pass for {record['member_name'] or 'VIP member'}")
     return get_pass(record["passcode"])
 
 
@@ -136,6 +171,7 @@ def save_pass(record: dict) -> None:
     payload = {
         "passcode": normalize_passcode(record.get("passcode", "")),
         "member_name": record.get("member_name", "").strip(),
+        "contact_email": normalize_email(record.get("contact_email", "")),
         "badge_name": record.get("badge_name", "").strip(),
         "badge_color": record.get("badge_color", "#f598b8"),
         "snack_json": json.dumps(record.get("snacks", {})),
@@ -146,16 +182,32 @@ def save_pass(record: dict) -> None:
         "created_at": record.get("created_at") or utc_now_iso(),
         "updated_at": utc_now_iso(),
     }
+    existing = get_pass(payload["passcode"])
+    tracked_fields = [
+        "member_name",
+        "contact_email",
+        "badge_name",
+        "badge_color",
+        "snack_json",
+        "spa_choice",
+        "merch_pick",
+        "extras_json",
+        "is_vip",
+    ]
+    changed_fields = [field for field in tracked_fields if str((existing or {}).get(field, "")) != str(payload[field])]
+    if existing and not changed_fields:
+        return
     with get_conn() as conn:
         conn.execute(
             """
             INSERT INTO vip_passes (
-                passcode, member_name, badge_name, badge_color,
+                passcode, member_name, contact_email, badge_name, badge_color,
                 snack_json, spa_choice, merch_pick, extras_json,
                 is_vip, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(passcode) DO UPDATE SET
                 member_name = excluded.member_name,
+                contact_email = excluded.contact_email,
                 badge_name = excluded.badge_name,
                 badge_color = excluded.badge_color,
                 snack_json = excluded.snack_json,
@@ -168,6 +220,7 @@ def save_pass(record: dict) -> None:
             (
                 payload["passcode"],
                 payload["member_name"],
+                payload["contact_email"],
                 payload["badge_name"],
                 payload["badge_color"],
                 payload["snack_json"],
@@ -179,6 +232,9 @@ def save_pass(record: dict) -> None:
                 payload["updated_at"],
             ),
         )
+    event_type = "updated" if existing else "created"
+    detail_text = ", ".join(changed_fields) if changed_fields else "initial save"
+    log_event(payload["passcode"], event_type, detail_text)
 
 
 
@@ -192,6 +248,77 @@ def stats() -> dict:
             (today,),
         ).fetchone()[0]
     return {"total_passes": total_passes, "vip_count": vip_count, "today_count": today_count}
+
+
+
+def list_passes_for_email(email: str) -> list[dict]:
+    normalized = normalize_email(email)
+    if not normalized:
+        return []
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM vip_passes
+            WHERE contact_email = ?
+            ORDER BY updated_at DESC
+            """,
+            (normalized,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+
+def recent_events(passcode: str | None = None, limit: int = 12) -> list[dict]:
+    with get_conn() as conn:
+        if passcode:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM pass_events
+                WHERE passcode = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (normalize_passcode(passcode), limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM pass_events
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+    return [dict(row) for row in rows]
+
+
+
+def search_passes(query: str = "", limit: int = 20) -> list[dict]:
+    cleaned = query.strip()
+    with get_conn() as conn:
+        if cleaned:
+            like = f"%{cleaned.lower()}%"
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM vip_passes
+                WHERE lower(passcode) LIKE ?
+                   OR lower(member_name) LIKE ?
+                   OR lower(contact_email) LIKE ?
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (like, like, like, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM vip_passes ORDER BY updated_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+    return [dict(row) for row in rows]
 
 
 
@@ -236,6 +363,7 @@ def apply_record_to_state(record: dict) -> None:
     st.session_state.record_created_at = record.get("created_at", utc_now_iso())
     st.session_state.record_updated_at = record.get("updated_at", utc_now_iso())
     st.session_state.member_name = record.get("member_name", "")
+    st.session_state.contact_email = record.get("contact_email", "")
     st.session_state.badge_name = record.get("badge_name", record.get("member_name", ""))
     st.session_state.badge_color = record.get("badge_color", "#f598b8")
     st.session_state.is_vip = bool(record.get("is_vip", 0))
@@ -256,6 +384,7 @@ def load_pass_into_state(passcode: str) -> bool:
     if not record:
         return False
     apply_record_to_state(record)
+    log_event(record["passcode"], "opened", "Pass opened from app")
     return True
 
 
@@ -265,6 +394,7 @@ def clear_current_pass() -> None:
     st.session_state.record_created_at = ""
     st.session_state.record_updated_at = ""
     st.session_state.member_name = ""
+    st.session_state.contact_email = ""
     st.session_state.badge_name = ""
     st.session_state.badge_color = "#f598b8"
     st.session_state.is_vip = False
@@ -286,6 +416,7 @@ def current_record_payload() -> dict:
         "passcode": st.session_state.get("current_passcode", ""),
         "created_at": st.session_state.get("record_created_at", utc_now_iso()),
         "member_name": st.session_state.get("member_name", "").strip(),
+        "contact_email": normalize_email(st.session_state.get("contact_email", "")),
         "badge_name": st.session_state.get("badge_name", "").strip(),
         "badge_color": st.session_state.get("badge_color", "#f598b8"),
         "snacks": {label: bool(st.session_state.get(f"snack::{label}", False)) for label in DEFAULT_SNACK_CHOICES},
@@ -520,12 +651,15 @@ for key, default_value in {
     "record_created_at": "",
     "record_updated_at": "",
     "member_name": "",
+    "contact_email": "",
     "badge_name": "",
     "badge_color": "#f598b8",
     "is_vip": False,
     "spa_choice": DEFAULT_SPA_CHOICES[0],
     "merch_pick": DEFAULT_MERCH_CHOICES[0],
     "badge_extras": [],
+    "recover_email_input": "",
+    "admin_search": "",
 }.items():
     st.session_state.setdefault(key, default_value)
 
@@ -619,12 +753,13 @@ st.markdown(
 st.markdown("</div>", unsafe_allow_html=True)
 
 st.markdown("<div class='status-card'>", unsafe_allow_html=True)
-st.markdown("<div class='card-title'>Create or open a pass</div>", unsafe_allow_html=True)
+st.markdown("<div class='card-title'>Create, open, or recover a pass</div>", unsafe_allow_html=True)
 create_col, open_col = st.columns(2)
 with create_col:
     new_member_name = st.text_input("VIP member name", key="new_member_name", placeholder="Type the name for a new pass")
+    new_contact_email = st.text_input("Recovery email", key="new_contact_email", placeholder="name@example.com")
     if st.button("Create new pass", use_container_width=True, key="create_pass_button"):
-        record = create_pass(new_member_name)
+        record = create_pass(new_member_name, new_contact_email)
         apply_record_to_state(record)
         st.success(f"Created pass {record['passcode']}")
 with open_col:
@@ -634,6 +769,27 @@ with open_col:
             st.success(f"Loaded pass {normalize_passcode(existing_code)}")
         else:
             st.error("That pass code was not found.")
+
+recover_email = st.text_input("Recover with email", key="recover_email_input", placeholder="Use the saved email to find your pass")
+if recover_email:
+    recover_matches = list_passes_for_email(recover_email)
+    if recover_matches:
+        st.caption(f"Found {len(recover_matches)} pass{'es' if len(recover_matches) != 1 else ''} for {normalize_email(recover_email)}")
+        for match in recover_matches[:5]:
+            row_col_1, row_col_2, row_col_3 = st.columns([2.4, 1.2, 1])
+            with row_col_1:
+                st.write(f"**{match['member_name'] or 'VIP member'}**")
+                st.caption(match.get("contact_email") or "No recovery email")
+            with row_col_2:
+                st.caption(f"Code {match['passcode']}")
+                st.caption(f"Saved {human_time(match.get('updated_at'))}")
+            with row_col_3:
+                if st.button("Open", key=f"recover_open_{match['passcode']}", use_container_width=True):
+                    apply_record_to_state(match)
+                    log_event(match["passcode"], "recovered", f"Recovered with {normalize_email(recover_email)}")
+                    st.rerun()
+    else:
+        st.info("No passes match that email yet.")
 
 if st.session_state.current_passcode:
     st.markdown("<div class='mini-note' style='margin-top:0.65rem;'>Current pass code</div>", unsafe_allow_html=True)
@@ -645,7 +801,7 @@ if st.session_state.current_passcode:
         clear_current_pass()
         st.rerun()
 else:
-    st.info("Create a pass or open one with its code to start editing shared data.")
+    st.info("Create a pass, open one by code, or recover it by email to start editing shared data.")
 st.markdown("</div>", unsafe_allow_html=True)
 
 if st.session_state.current_passcode:
@@ -653,6 +809,7 @@ if st.session_state.current_passcode:
     st.markdown("<div class='card-title'>How to get V.I.P.</div>", unsafe_allow_html=True)
     st.markdown("<div class='hand-copy'>A worker will tell you how to get V.I.P.<br><span class='mini-note'>This status now saves across devices for the same pass code.</span></div>", unsafe_allow_html=True)
     st.text_input("VIP member name", key="member_name", placeholder="Type the VIP member name")
+    st.text_input("Recovery email", key="contact_email", placeholder="name@example.com")
     if not st.session_state.get("badge_name") and st.session_state.get("member_name"):
         st.session_state.badge_name = st.session_state.member_name
     button_text = "ASK FOR VIP STATUS" if not st.session_state.is_vip else "YOU ARE NOW VIP"
@@ -663,6 +820,23 @@ if st.session_state.current_passcode:
         st.success("VIP unlocked.")
     else:
         st.info("Tap when a worker says you're ready.")
+    if st.session_state.get("contact_email"):
+        st.caption(f"Recovery email on file: {normalize_email(st.session_state.contact_email)}")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("<div class='section-card'>", unsafe_allow_html=True)
+    st.markdown("<div class='card-title'>Request History</div>", unsafe_allow_html=True)
+    pass_history = recent_events(st.session_state.current_passcode, limit=12)
+    if pass_history:
+        for event in pass_history:
+            detail = event.get("details", "").strip() or "No extra detail"
+            event_type = event.get("event_type", "updated").replace("_", " ").title()
+            st.markdown(
+                f"**{event_type}** · {human_time(event.get('created_at'))}<br><span class='mini-note'>{detail}</span>",
+                unsafe_allow_html=True,
+            )
+    else:
+        st.info("No saved history for this pass yet.")
     st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown("<div class='paper-card'>", unsafe_allow_html=True)
@@ -738,3 +912,38 @@ if st.session_state.current_passcode:
     st.markdown(f"<div class='footer-note'>Shared pass saved. Reopen with code {st.session_state.current_passcode} from another device.</div>", unsafe_allow_html=True)
 else:
     st.markdown("<div class='footer-note'>Create or open a shared pass to start the multi-user experience.</div>", unsafe_allow_html=True)
+
+st.markdown("<div class='status-card'>", unsafe_allow_html=True)
+st.markdown("<div class='card-title'>Worker / Admin Tools</div>", unsafe_allow_html=True)
+st.markdown("<div class='mini-note'>Search by pass code, member name, or recovery email. Open a pass and review the latest shared activity.</div>", unsafe_allow_html=True)
+admin_query = st.text_input("Search passes", key="admin_search", placeholder="Search by code, name, or email")
+admin_results = search_passes(admin_query, limit=10)
+if admin_results:
+    for result in admin_results:
+        summary_col, detail_col, action_col = st.columns([2.2, 1.4, 1])
+        with summary_col:
+            st.write(f"**{result.get('member_name') or 'VIP member'}**")
+            st.caption(result.get("contact_email") or "No recovery email")
+        with detail_col:
+            vip_label = "VIP unlocked" if result.get("is_vip") else "Standard pass"
+            st.caption(f"Code {result['passcode']} · {vip_label}")
+            st.caption(f"Saved {human_time(result.get('updated_at'))}")
+        with action_col:
+            if st.button("Load", key=f"admin_load_{result['passcode']}", use_container_width=True):
+                apply_record_to_state(result)
+                log_event(result["passcode"], "admin_opened", "Opened from worker/admin tools")
+                st.rerun()
+else:
+    st.info("No passes found yet.")
+
+global_history = recent_events(limit=10)
+if global_history:
+    st.markdown("<div class='mini-note' style='margin-top:0.65rem;'>Latest activity across passes</div>", unsafe_allow_html=True)
+    for event in global_history:
+        detail = event.get("details", "").strip() or "No extra detail"
+        event_type = event.get("event_type", "updated").replace("_", " ").title()
+        st.markdown(
+            f"**{event.get('passcode', '')}** · {event_type} · {human_time(event.get('created_at'))}<br><span class='mini-note'>{detail}</span>",
+            unsafe_allow_html=True,
+        )
+st.markdown("</div>", unsafe_allow_html=True)
