@@ -10,14 +10,18 @@
 - Existing pass open/load flow
 - Email-based pass recovery
 - Request/event history backed by `pass_events`
-- Worker/admin search and load tools
+- Separate worker/admin page linked from the main customer page
+- Worker/admin search, load, and VIP approve/reject tools
+- VIP approval workflow with pending and rejected states
 - Additive SQLite migration for legacy DBs
 - Automated tests for core flows and Streamlit smoke render
 
 ## Verified Locally
 - Create pass flow works
 - Recover by email works
+- Admin page renders separately from the customer page
 - Admin load works
+- VIP requests stay pending until approved by admin
 - Event history writes correctly
 - Automated test suite passes locally
 
@@ -34,8 +38,9 @@
 ### Implemented Locally
 - Request history / event log
 - Email recovery
-- Worker/admin tools
-- Automated tests for DB migration, create/recover/search/history, admin load, and Streamlit smoke render
+- Separate admin tools page and main-page link
+- VIP approval and rejection workflow
+- Automated tests for DB migration, create/recover/search/history, VIP approval flow, admin load, and Streamlit smoke render
 
 ### Blocked
 - Push latest commits upstream
