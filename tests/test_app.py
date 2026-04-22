@@ -150,3 +150,20 @@ def test_streamlit_smoke_renders_without_exception(tmp_path: Path) -> None:
     assert not admin_at.exception
     assert any(field.label == "Search passes" for field in admin_at.text_input)
     assert any(button.label == "Approve" for button in admin_at.button)
+
+
+def test_streamlit_vip_request_button_updates_without_exception(tmp_path: Path) -> None:
+    at = AppTest.from_file("app.py")
+    at.run(timeout=30)
+
+    at.text_input(key="new_member_name").input("Button Test")
+    at.text_input(key="new_contact_email").input("button.test@example.com")
+    at.button(key="create_pass_button").click()
+    at.run(timeout=30)
+    assert not at.exception
+
+    at.button(key="vip_status_button").click()
+    at.run(timeout=30)
+
+    assert not at.exception
+    assert any("pending admin approval" in info.value for info in at.info)

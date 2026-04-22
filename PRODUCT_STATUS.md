@@ -13,6 +13,7 @@
 - Separate worker/admin page linked from the main customer page
 - Worker/admin search, load, and VIP approve/reject tools
 - VIP approval workflow with pending and rejected states
+- Fixed the customer-side VIP request button regression caused by widget state updates after render
 - Additive SQLite migration for legacy DBs
 - Automated tests for core flows and Streamlit smoke render
 
@@ -22,6 +23,7 @@
 - Admin page renders separately from the customer page
 - Admin load works
 - VIP requests stay pending until approved by admin
+- VIP request button click path works without throwing a Streamlit error page
 - Event history writes correctly
 - Automated test suite passes locally
 

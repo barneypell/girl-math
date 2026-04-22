@@ -1008,7 +1008,9 @@ if st.session_state.current_passcode:
     ):
         requested = request_vip_approval(st.session_state.current_passcode)
         if requested:
-            apply_record_to_state(requested)
+            st.session_state.vip_status = normalize_vip_status(requested.get("vip_status"))
+            st.session_state.is_vip = bool(requested.get("is_vip"))
+            st.session_state.record_updated_at = requested.get("updated_at", st.session_state.record_updated_at)
         st.rerun()
     if vip_status == "approved":
         st.success("VIP approved.")
