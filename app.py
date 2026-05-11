@@ -6,7 +6,7 @@ import secrets
 import sqlite3
 import string
 import urllib.parse
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import streamlit as st
@@ -21,8 +21,13 @@ st.set_page_config(
 
 
 DB_PATH = Path(__file__).with_name("girl_math.db")
+STANDARD_PASS_PRICE = 8
+FRIDAY_PASS_PRICE = 5
+FRIDAY_DISCOUNT = 3
 DEFAULT_SNACK_CHOICES = ["Healthy Pack", "Sweet Tooth", "Lemonade", "Milkshakes"]
-DEFAULT_SPA_CHOICES = ["Mini manicure", "Hair sparkle", "Dress-up glam", "Comics corner"]
+DEFAULT_SPA_CHOICES = ["Mini manicure", "Hair sparkle", "Dress-up glam"]
+DEFAULT_SPA_ADD_ON_CHOICES = ["Shampoo style reset", "Cream glow treatment"]
+DEFAULT_COMIC_CHOICES = ["Where did you get it?", "Girl Math VIP!", "1 second later..."]
 DEFAULT_MERCH_CHOICES = ["Custom name tag", "Sticker pack", "Bow accessory", "Surprise merch"]
 DEFAULT_EXTRA_CHOICES = ["Pink", "Orange", "Gems", "Hearts", "Sparkles"]
 
@@ -49,6 +54,8 @@ def init_db() -> None:
                 badge_color TEXT NOT NULL DEFAULT '#f598b8',
                 snack_json TEXT NOT NULL DEFAULT '{}',
                 spa_choice TEXT NOT NULL DEFAULT 'Mini manicure',
+                spa_add_on_json TEXT NOT NULL DEFAULT '[]',
+                comic_choice TEXT NOT NULL DEFAULT 'Where did you get it?',
                 merch_pick TEXT NOT NULL DEFAULT 'Custom name tag',
                 extras_json TEXT NOT NULL DEFAULT '[]',
                 vip_status TEXT NOT NULL DEFAULT 'not_requested',
@@ -70,6 +77,20 @@ def init_db() -> None:
                 WHERE vip_status IS NULL OR vip_status = '' OR vip_status = 'not_requested'
                 """
             )
+        if "spa_add_on_json" not in columns:
+            conn.execute("ALTER TABLE vip_passes ADD COLUMN spa_add_on_json TEXT NOT NULL DEFAULT '[]'")
+        if "comic_choice" not in columns:
+            conn.execute(
+                f"ALTER TABLE vip_passes ADD COLUMN comic_choice TEXT NOT NULL DEFAULT '{DEFAULT_COMIC_CHOICES[0]}'"
+            )
+        conn.execute(
+            "UPDATE vip_passes SET spa_choice = ? WHERE spa_choice IS NULL OR spa_choice = '' OR spa_choice = ?",
+            (DEFAULT_SPA_CHOICES[0], "Comics corner"),
+        )
+        conn.execute(
+            "UPDATE vip_passes SET comic_choice = ? WHERE comic_choice IS NULL OR comic_choice = ''",
+            (DEFAULT_COMIC_CHOICES[0],),
+        )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS pass_events (
@@ -101,6 +122,29 @@ def normalize_vip_status(value: str | None) -> str:
     return "not_requested"
 
 
+def normalize_spa_choice(value: str | None) -> str:
+    cleaned = str(value or "").strip()
+    return cleaned if cleaned in DEFAULT_SPA_CHOICES else DEFAULT_SPA_CHOICES[0]
+
+
+def normalize_comic_choice(value: str | None) -> str:
+    cleaned = str(value or "").strip()
+    return cleaned if cleaned in DEFAULT_COMIC_CHOICES else DEFAULT_COMIC_CHOICES[0]
+
+
+def normalize_spa_add_ons(values: list[str] | None) -> list[str]:
+    if not values:
+        return []
+    seen: set[str] = set()
+    normalized: list[str] = []
+    for item in values:
+        cleaned = str(item or "").strip()
+        if cleaned in DEFAULT_SPA_ADD_ON_CHOICES and cleaned not in seen:
+            normalized.append(cleaned)
+            seen.add(cleaned)
+    return normalized
+
+
 def generate_passcode(length: int = 6) -> str:
     alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
     while True:
@@ -119,6 +163,8 @@ def default_pass_record(member_name: str = "") -> dict:
         "badge_color": "#f598b8",
         "snack_json": json.dumps({label: False for label in DEFAULT_SNACK_CHOICES}),
         "spa_choice": DEFAULT_SPA_CHOICES[0],
+        "spa_add_on_json": json.dumps([]),
+        "comic_choice": DEFAULT_COMIC_CHOICES[0],
         "merch_pick": DEFAULT_MERCH_CHOICES[0],
         "extras_json": json.dumps([]),
         "vip_status": "not_requested",
@@ -151,9 +197,9 @@ def create_pass(member_name: str = "", contact_email: str = "") -> dict:
             """
             INSERT INTO vip_passes (
                 passcode, member_name, contact_email, badge_name, badge_color,
-                snack_json, spa_choice, merch_pick, extras_json, vip_status,
+                snack_json, spa_choice, spa_add_on_json, comic_choice, merch_pick, extras_json, vip_status,
                 is_vip, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 record["passcode"],
@@ -163,6 +209,8 @@ def create_pass(member_name: str = "", contact_email: str = "") -> dict:
                 record["badge_color"],
                 record["snack_json"],
                 record["spa_choice"],
+                record["spa_add_on_json"],
+                record["comic_choice"],
                 record["merch_pick"],
                 record["extras_json"],
                 record["vip_status"],
@@ -205,7 +253,9 @@ def save_pass(record: dict) -> None:
         "badge_name": record.get("badge_name", "").strip(),
         "badge_color": record.get("badge_color", "#f598b8"),
         "snack_json": json.dumps(record.get("snacks", {})),
-        "spa_choice": record.get("spa_choice", DEFAULT_SPA_CHOICES[0]),
+        "spa_choice": normalize_spa_choice(record.get("spa_choice", DEFAULT_SPA_CHOICES[0])),
+        "spa_add_on_json": json.dumps(normalize_spa_add_ons(record.get("spa_add_ons", []))),
+        "comic_choice": normalize_comic_choice(record.get("comic_choice", DEFAULT_COMIC_CHOICES[0])),
         "merch_pick": record.get("merch_pick", DEFAULT_MERCH_CHOICES[0]),
         "extras_json": json.dumps(record.get("extras", [])),
         "vip_status": final_vip_status,
@@ -220,6 +270,8 @@ def save_pass(record: dict) -> None:
         "badge_color",
         "snack_json",
         "spa_choice",
+        "spa_add_on_json",
+        "comic_choice",
         "merch_pick",
         "extras_json",
         "vip_status",
@@ -233,9 +285,9 @@ def save_pass(record: dict) -> None:
             """
             INSERT INTO vip_passes (
                 passcode, member_name, contact_email, badge_name, badge_color,
-                snack_json, spa_choice, merch_pick, extras_json, vip_status,
+                snack_json, spa_choice, spa_add_on_json, comic_choice, merch_pick, extras_json, vip_status,
                 is_vip, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(passcode) DO UPDATE SET
                 member_name = excluded.member_name,
                 contact_email = excluded.contact_email,
@@ -243,6 +295,8 @@ def save_pass(record: dict) -> None:
                 badge_color = excluded.badge_color,
                 snack_json = excluded.snack_json,
                 spa_choice = excluded.spa_choice,
+                spa_add_on_json = excluded.spa_add_on_json,
+                comic_choice = excluded.comic_choice,
                 merch_pick = excluded.merch_pick,
                 extras_json = excluded.extras_json,
                 vip_status = excluded.vip_status,
@@ -257,6 +311,8 @@ def save_pass(record: dict) -> None:
                 payload["badge_color"],
                 payload["snack_json"],
                 payload["spa_choice"],
+                payload["spa_add_on_json"],
+                payload["comic_choice"],
                 payload["merch_pick"],
                 payload["extras_json"],
                 payload["vip_status"],
@@ -428,6 +484,65 @@ def parse_extras(record: dict | None) -> list[str]:
 
 
 
+def parse_spa_add_ons(record: dict | None) -> list[str]:
+    if not record:
+        return []
+    try:
+        loaded = json.loads(record.get("spa_add_on_json", "[]"))
+    except (TypeError, json.JSONDecodeError):
+        loaded = []
+    return normalize_spa_add_ons(loaded if isinstance(loaded, list) else [])
+
+
+
+def current_pricing(on_date: date | None = None) -> dict[str, int | bool | str]:
+    target_date = on_date or datetime.now(timezone.utc).date()
+    is_friday = target_date.weekday() == 4
+    monthly_price = FRIDAY_PASS_PRICE if is_friday else STANDARD_PASS_PRICE
+    return {
+        "is_friday": is_friday,
+        "monthly_price": monthly_price,
+        "discount": FRIDAY_DISCOUNT if is_friday else 0,
+        "label": "Friday special" if is_friday else "Standard day price",
+    }
+
+
+
+def build_pass_summary(record: dict | None, on_date: date | None = None) -> dict:
+    record = record or {}
+    vip_status = normalize_vip_status(record.get("vip_status", "approved" if record.get("is_vip") else "not_requested"))
+    is_vip = vip_status == "approved" or bool(record.get("is_vip", 0))
+    pricing = current_pricing(on_date)
+    if "snack_json" in record:
+        snacks = parse_snacks(record)
+    else:
+        snacks = {label: bool((record.get("snacks") or {}).get(label, False)) for label in DEFAULT_SNACK_CHOICES}
+    snack_labels = [label for label in DEFAULT_SNACK_CHOICES if snacks.get(label)]
+    spa_choice = normalize_spa_choice(record.get("spa_choice", DEFAULT_SPA_CHOICES[0]))
+    if "spa_add_on_json" in record:
+        spa_add_ons = parse_spa_add_ons(record)
+    else:
+        spa_add_ons = normalize_spa_add_ons(record.get("spa_add_ons", []))
+    comic_choice = normalize_comic_choice(record.get("comic_choice", DEFAULT_COMIC_CHOICES[0]))
+    included_items = []
+    if snack_labels:
+        included_items.append("Snack bar picks: " + ", ".join(snack_labels))
+    included_items.append(f"Spa treatment: {spa_choice}")
+    included_items.append(f"Weekly comic: {comic_choice}")
+    return {
+        "vip_status": vip_status,
+        "is_vip": is_vip,
+        "pricing": pricing,
+        "included_items": included_items,
+        "paid_add_ons": spa_add_ons,
+        "snack_labels": snack_labels,
+        "spa_choice": spa_choice,
+        "comic_choice": comic_choice,
+        "merch_pick": record.get("merch_pick", DEFAULT_MERCH_CHOICES[0]),
+    }
+
+
+
 def human_time(iso_value: str | None) -> str:
     if not iso_value:
         return "just now"
@@ -468,7 +583,9 @@ def apply_record_to_state(record: dict) -> None:
     st.session_state.badge_color = record.get("badge_color", "#f598b8")
     st.session_state.vip_status = vip_status
     st.session_state.is_vip = vip_status == "approved" or bool(record.get("is_vip", 0))
-    st.session_state.spa_choice = record.get("spa_choice", DEFAULT_SPA_CHOICES[0])
+    st.session_state.spa_choice = normalize_spa_choice(record.get("spa_choice", DEFAULT_SPA_CHOICES[0]))
+    st.session_state.spa_add_ons = parse_spa_add_ons(record)
+    st.session_state.comic_choice = normalize_comic_choice(record.get("comic_choice", DEFAULT_COMIC_CHOICES[0]))
     st.session_state.merch_pick = record.get("merch_pick", DEFAULT_MERCH_CHOICES[0])
     st.session_state.badge_extras = parse_extras(record)
     for label, selected in parse_snacks(record).items():
@@ -501,6 +618,8 @@ def clear_current_pass() -> None:
     st.session_state.vip_status = "not_requested"
     st.session_state.is_vip = False
     st.session_state.spa_choice = DEFAULT_SPA_CHOICES[0]
+    st.session_state.spa_add_ons = []
+    st.session_state.comic_choice = DEFAULT_COMIC_CHOICES[0]
     st.session_state.merch_pick = DEFAULT_MERCH_CHOICES[0]
     st.session_state.badge_extras = []
     for label in DEFAULT_SNACK_CHOICES:
@@ -522,7 +641,9 @@ def current_record_payload() -> dict:
         "badge_name": st.session_state.get("badge_name", "").strip(),
         "badge_color": st.session_state.get("badge_color", "#f598b8"),
         "snacks": {label: bool(st.session_state.get(f"snack::{label}", False)) for label in DEFAULT_SNACK_CHOICES},
-        "spa_choice": st.session_state.get("spa_choice", DEFAULT_SPA_CHOICES[0]),
+        "spa_choice": normalize_spa_choice(st.session_state.get("spa_choice", DEFAULT_SPA_CHOICES[0])),
+        "spa_add_ons": normalize_spa_add_ons(st.session_state.get("spa_add_ons", [])),
+        "comic_choice": normalize_comic_choice(st.session_state.get("comic_choice", DEFAULT_COMIC_CHOICES[0])),
         "merch_pick": st.session_state.get("merch_pick", DEFAULT_MERCH_CHOICES[0]),
         "extras": st.session_state.get("badge_extras", []),
         "vip_status": normalize_vip_status(st.session_state.get("vip_status", "not_requested")),
@@ -724,9 +845,51 @@ COMIC_STRIP_HTML = f"""
 """
 
 
+def badge_extra_svg(extras: list[str]) -> str:
+    icon_map = {
+        "Pink": """
+        <g>
+          <circle cx="0" cy="0" r="11" fill="#f4a9bf" stroke="#cf6e92" stroke-width="2"/>
+          <circle cx="-14" cy="4" r="6" fill="#ffd6e5" stroke="#cf6e92" stroke-width="1.5"/>
+          <circle cx="14" cy="4" r="6" fill="#ffd6e5" stroke="#cf6e92" stroke-width="1.5"/>
+        </g>
+        """,
+        "Orange": """
+        <g>
+          <circle cx="0" cy="0" r="11" fill="#ffbf7d" stroke="#d68b3f" stroke-width="2"/>
+          <path d="M0 -16 L4 -5 L16 -5 L6 2 L10 14 L0 7 L-10 14 L-6 2 L-16 -5 L-4 -5 Z" fill="#ffd9ab" stroke="#d68b3f" stroke-width="1.5"/>
+        </g>
+        """,
+        "Gems": """
+        <g>
+          <path d="M0 -15 L14 0 L0 15 L-14 0 Z" fill="#d8f4ff" stroke="#7bb5c9" stroke-width="2"/>
+          <path d="M18 -9 L26 0 L18 9 L10 0 Z" fill="#fff2bb" stroke="#d1b25a" stroke-width="2"/>
+        </g>
+        """,
+        "Hearts": """
+        <g>
+          <path d="M0 12 C-18 -2, -18 -18, -4 -20 C3 -21, 8 -16, 10 -12 C12 -16, 17 -21, 24 -20 C38 -18, 38 -2, 20 12 L10 20 Z" fill="#ffdbe8" stroke="#d98fab" stroke-width="2"/>
+        </g>
+        """,
+        "Sparkles": """
+        <g>
+          <path d="M0 -18 L4 -4 L18 0 L4 4 L0 18 L-4 4 L-18 0 L-4 -4 Z" fill="#fff4a8" stroke="#d1b25a" stroke-width="2"/>
+          <path d="M20 -10 L23 -2 L31 1 L23 4 L20 12 L17 4 L9 1 L17 -2 Z" fill="#ffe7ef" stroke="#d98fab" stroke-width="1.5"/>
+        </g>
+        """,
+    }
+    selected = [item for item in extras if item in icon_map]
+    positions = [150, 205, 260, 315, 370]
+    return "".join(
+        f"<g transform='translate({positions[index]}, 150)'>{icon_map[item]}</g>"
+        for index, item in enumerate(selected[: len(positions)])
+    )
+
+
+
 def badge_svg(name: str, color: str, extras: list[str]) -> str:
     safe_name = html.escape(name) if name else "Your Name"
-    safe_line = html.escape(" • ".join(extras) if extras else "VIP MEMBER")
+    icon_markup = badge_extra_svg(extras)
     svg = f"""
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 460 220" width="460" height="220">
       <defs>
@@ -743,7 +906,8 @@ def badge_svg(name: str, color: str, extras: list[str]) -> str:
       <path d="M124 66 C124 54, 134 44, 146 44 C158 44, 168 54, 168 66 C168 84, 146 98, 146 98 C146 98, 124 84, 124 66 Z" fill="#ffdbe8" stroke="#d98fab" stroke-width="4"/>
       <path d="M292 66 C292 54, 302 44, 314 44 C326 44, 336 54, 336 66 C336 84, 314 98, 314 98 C314 98, 292 84, 292 66 Z" fill="#ffdbe8" stroke="#d98fab" stroke-width="4"/>
       <text x="230" y="114" text-anchor="middle" font-size="42" font-family="Bubblegum Sans, Comic Sans MS, sans-serif" fill="#ffffff">{safe_name}</text>
-      <text x="230" y="148" text-anchor="middle" font-size="24" font-family="Patrick Hand, Comic Sans MS, sans-serif" fill="#fff7fb">{safe_line}</text>
+      <text x="230" y="148" text-anchor="middle" font-size="24" font-family="Patrick Hand, Comic Sans MS, sans-serif" fill="#fff7fb">VIP MEMBER</text>
+      {icon_markup}
     </svg>
     """
     return svg_data_uri(svg)
@@ -798,6 +962,32 @@ def render_admin_page() -> None:
     else:
         st.info("No passes found yet.")
 
+    if st.session_state.get("current_passcode"):
+        current_record = get_pass(st.session_state.current_passcode)
+        if current_record:
+            summary = build_pass_summary(current_record)
+            pricing = summary["pricing"]
+            st.markdown("<div class='status-card'>", unsafe_allow_html=True)
+            st.markdown("<div class='card-title'>Loaded pass summary</div>", unsafe_allow_html=True)
+            st.markdown(
+                f"<div class='mini-note'>{current_record.get('member_name') or 'VIP member'} · Code {current_record['passcode']} · {vip_status_label(current_record.get('vip_status'), bool(current_record.get('is_vip')))}</div>",
+                unsafe_allow_html=True,
+            )
+            st.write(f"Monthly VIP price today: ${pricing['monthly_price']}")
+            if pricing["is_friday"]:
+                st.caption(f"Friday discount active: save ${pricing['discount']}")
+            st.write("Included with VIP")
+            for item in summary["included_items"]:
+                st.caption(f"• {item}")
+            if summary["paid_add_ons"]:
+                st.write("Paid add-ons")
+                for item in summary["paid_add_ons"]:
+                    st.caption(f"• {item}")
+            else:
+                st.caption("No paid add-ons selected.")
+            st.caption(f"Merch pick: {summary['merch_pick']}")
+            st.markdown("</div>", unsafe_allow_html=True)
+
     global_history = recent_events(limit=12)
     if global_history:
         st.markdown("<div class='mini-note' style='margin-top:0.65rem;'>Latest activity across passes</div>", unsafe_allow_html=True)
@@ -822,6 +1012,8 @@ for key, default_value in {
     "vip_status": "not_requested",
     "is_vip": False,
     "spa_choice": DEFAULT_SPA_CHOICES[0],
+    "spa_add_ons": [],
+    "comic_choice": DEFAULT_COMIC_CHOICES[0],
     "merch_pick": DEFAULT_MERCH_CHOICES[0],
     "badge_extras": [],
     "recover_email_input": "",
@@ -1024,6 +1216,28 @@ if st.session_state.current_passcode:
         st.caption(f"Recovery email on file: {normalize_email(st.session_state.contact_email)}")
     st.markdown("</div>", unsafe_allow_html=True)
 
+    summary = build_pass_summary(current_record_payload())
+    pricing = summary["pricing"]
+    st.markdown("<div class='section-card'>", unsafe_allow_html=True)
+    st.markdown("<div class='card-title'>Monthly VIP Pricing</div>", unsafe_allow_html=True)
+    st.markdown(
+        f"<div class='field-caption'>Monthly VIP pass price today: ${pricing['monthly_price']}. Standard monthly price: ${STANDARD_PASS_PRICE}.</div>",
+        unsafe_allow_html=True,
+    )
+    if pricing["is_friday"]:
+        st.success(f"Friday special is live today. Discount applied: ${pricing['discount']}.")
+    else:
+        st.info(f"Friday special price is ${FRIDAY_PASS_PRICE}.")
+    if summary["is_vip"]:
+        st.caption("VIP is approved, so snack bar picks and non-consumable spa treatments count as included.")
+    else:
+        st.caption("VIP perks unlock after approval. Snacks and the selected spa treatment are tracked here for the worker team.")
+    if summary["paid_add_ons"]:
+        st.warning("Consumable spa services stay paid add-ons: " + ", ".join(summary["paid_add_ons"]))
+    else:
+        st.caption("No paid consumable spa add-ons selected.")
+    st.markdown("</div>", unsafe_allow_html=True)
+
     st.markdown("<div class='section-card'>", unsafe_allow_html=True)
     st.markdown("<div class='card-title'>Request History</div>", unsafe_allow_html=True)
     pass_history = recent_events(st.session_state.current_passcode, limit=12)
@@ -1074,7 +1288,7 @@ if st.session_state.current_passcode:
 
     st.markdown("<div class='section-card'>", unsafe_allow_html=True)
     st.markdown("<div class='card-title'>Snack Bar</div>", unsafe_allow_html=True)
-    st.markdown("<div class='field-caption'>Pick today’s favorites.</div>", unsafe_allow_html=True)
+    st.markdown("<div class='field-caption'>Pick today’s favorites. Snack bar items are included free with VIP.</div>", unsafe_allow_html=True)
     for label in DEFAULT_SNACK_CHOICES:
         st.checkbox(label, key=f"snack::{label}")
     picked = [label for label in DEFAULT_SNACK_CHOICES if st.session_state.get(f"snack::{label}")]
@@ -1082,11 +1296,28 @@ if st.session_state.current_passcode:
     st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown("<div class='section-card'>", unsafe_allow_html=True)
-    st.markdown("<div class='card-title'>Spa Treatments + Weekly Comics</div>", unsafe_allow_html=True)
-    st.markdown("<div class='field-caption'>Choose a spa moment.</div>", unsafe_allow_html=True)
-    st.radio("Choose a spa moment:", DEFAULT_SPA_CHOICES, key="spa_choice")
-    st.caption(f"Today’s choice: {st.session_state.spa_choice}")
-    st.markdown("<div class='mini-note'>New comic scenes can be dropped in daily or weekly.</div>", unsafe_allow_html=True)
+    st.markdown("<div class='card-title'>Spa Treatments</div>", unsafe_allow_html=True)
+    st.markdown("<div class='field-caption'>Pick one included non-consumable spa treatment.</div>", unsafe_allow_html=True)
+    st.radio("Choose a spa treatment:", DEFAULT_SPA_CHOICES, key="spa_choice")
+    st.multiselect(
+        "Consumable spa add-ons",
+        DEFAULT_SPA_ADD_ON_CHOICES,
+        key="spa_add_ons",
+        help="Anything that uses cream or shampoo stays a paid add-on.",
+    )
+    st.caption(f"Included spa choice: {st.session_state.spa_choice}")
+    if st.session_state.spa_add_ons:
+        st.caption("Paid add-ons: " + ", ".join(st.session_state.spa_add_ons))
+    else:
+        st.caption("Paid add-ons: none yet")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("<div class='section-card'>", unsafe_allow_html=True)
+    st.markdown("<div class='card-title'>Weekly Comics</div>", unsafe_allow_html=True)
+    st.markdown("<div class='field-caption'>Comics are tracked separately from spa treatments.</div>", unsafe_allow_html=True)
+    st.radio("Choose a weekly comic:", DEFAULT_COMIC_CHOICES, key="comic_choice")
+    st.caption(f"This week’s comic: {st.session_state.comic_choice}")
+    st.markdown("<div class='mini-note'>Comic layout updates against Alexandra's originals are still the next art pass.</div>", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown("<div class='section-card'>", unsafe_allow_html=True)

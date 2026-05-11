@@ -8,6 +8,7 @@
 - Admin tools were later moved off the main page and onto a separate admin view.
 - VIP was changed from automatic unlock to explicit admin approval.
 - A customer-side VIP request regression was found from a live error screenshot, reproduced locally, fixed, tested, and pushed live.
+- The next product pass migrated the app from the old combined spa/comics placeholder menu to separate saved Spa Treatments and Weekly Comics sections, added Friday pricing logic, tracked consumable spa add-ons separately, upgraded the worker summary, and switched name-tag extras from text labels to graphic icons.
 
 ## Commit Milestones Called Out During This Workstream
 - `ca4fff4` — add pass recovery, history, and admin tools.
@@ -20,6 +21,7 @@
 - Local tests were repeatedly run during implementation.
 - Live app verification confirmed separate customer and admin page structure.
 - Barney later confirmed the VIP request and approval workflow seems to work.
+- The pricing / section split pass was verified locally with the automated suite at 7/7 passing.
 
 ## Project Direction Shift
 - The project moved from simple pass management toward a richer product with membership pricing logic, included-vs-paid service logic, stronger worker/admin clarity, and art-faithful rendering.

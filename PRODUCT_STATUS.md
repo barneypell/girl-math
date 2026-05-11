@@ -15,6 +15,11 @@
 - VIP approval workflow with pending and rejected states
 - Fixed the customer-side VIP request button regression caused by widget state updates after render
 - Additive SQLite migration for legacy DBs
+- Monthly VIP pricing with Friday discount logic
+- Separate saved Spa Treatments and Weekly Comics selections
+- Consumable spa add-ons tracked separately from included spa treatments
+- Worker/admin summary that separates included VIP items from paid add-ons
+- Graphic icon rendering for name-tag extras
 - Automated tests for core flows and Streamlit smoke render
 
 ## Verified Locally
@@ -25,7 +30,8 @@
 - VIP requests stay pending until approved by admin
 - VIP request button click path works without throwing a Streamlit error page
 - Event history writes correctly
-- Automated test suite passes locally
+- Pricing summary logic works for Friday and non-Friday cases
+- Automated test suite passes locally at 7/7
 
 ## Known External Blockers
 - Push/deploy access is not working from the current session
@@ -42,12 +48,17 @@
 - Email recovery
 - Separate admin tools page and main-page link
 - VIP approval and rejection workflow
-- Automated tests for DB migration, create/recover/search/history, VIP approval flow, admin load, and Streamlit smoke render
+- Monthly VIP pricing with Friday discount logic
+- Separate Spa Treatments and Weekly Comics sections
+- Paid consumable spa add-on tracking
+- Worker summary for included items vs paid add-ons
+- Graphic name-tag extras
+- Automated tests for DB migration, create/recover/search/history, VIP approval flow, pricing summary logic, admin load, and Streamlit smoke render
 
 ### Blocked
 - Push latest commits upstream
 - Verify live deployment after publish
 
 ### Missing Reconstruction
-- The full prior locked feature-request list has not yet been fully reconstructed into this document
-- Next step: recover the remaining requested items from chat/repo context and add them here explicitly
+- Comic rendering still needs to be rebuilt around Alexandra's original layouts
+- The remaining roadmap from Barney's full feature summary still needs to be staged explicitly
